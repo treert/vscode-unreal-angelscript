@@ -20,6 +20,7 @@
   - `DAP调试架构说明.md` — DAP 适配器架构、消息映射
   - `引擎侧断点判定细节.md` — 引擎侧 DebugServer 断点/单步/数据断点机制
   - `AngelScript虚拟机架构说明.md` — VM 寄存器/数据栈/调用栈、ExecuteNext 解释器、caller 委托调用桥、异常展开、JIT 挂点
+  - `Precompile与StaticJIT架构说明.md` — 字节码缓存（PrecompiledData）、C++ 离线转译流水线（AS_JITTED_CODE）、FJITDatabase 指针重定位、去虚化与 FloatingStack
 
 ## 运行时（引擎侧）
 
@@ -38,6 +39,6 @@ LSP/DAP 与运行时的通信：TCP `127.0.0.1:27099`，自定义二进制协议
 - [x] DAP 架构（断点/单步/数据断点的实现链路）
 - [x] 引擎侧断点判定（LineCallback、调试寄存器）
 - [x] AngelScript 虚拟机（字节码执行、Context/调用栈）
-- [ ] Precompile / StaticJIT（脚本预编译加速）
+- [x] Precompile / StaticJIT（脚本预编译加速）
 - [ ] 语法解析（pegjs 语法、LSP 侧的作用域/类型解析流水线）
 - [ ] 类型绑定（UE 反射 ↔ AngelScript 类型的桥接）
