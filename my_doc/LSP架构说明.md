@@ -6,11 +6,11 @@
 ## 1. 总体架构
 
 ```
-┌────────────────────┐  LSP (stdio / IPC)  ┌──────────────────┐  TCP 127.0.0.1:27099  ┌───────────────────────┐
-│  VSCode 扩展        │ ◄─────────────────► │  ue-angelscript-ls │ ◄───────────────────► │  UE 编辑器内的         │
-│  extension/        │   vscode-languageclient │  (Node.js 服务)    │   自定义二进制消息协议     │  Angelscript 插件       │
-│                   │                     │  language-server/ │                      │  AngelscriptDebugServer │
-└────────────────────┘                     └──────────────────┘                      └───────────────────────┘
+┌────────────────────┐  LSP (stdio / IPC)  ┌────────────────────┐  TCP 127.0.0.1:27099  ┌─────────────────────────┐
+│  VSCode extension  │ ◄─────────────────► │  ue-angelscript-ls │ ◄───────────────────► │  UE Editor              │
+│  extension/        │  vs-languageclient  │  (Node.js server)  │ custom binary protocol│  Angelscript Plugin     │
+│                    │                     │  language-server/  │                       │  AngelscriptDebugServer │
+└────────────────────┘                     └────────────────────┘                       └─────────────────────────┘
                                                      │
                                                      │ 启动时 glob 扫描工作区所有 *.as
                                                      ▼
