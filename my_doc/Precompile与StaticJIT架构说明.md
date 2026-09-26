@@ -106,6 +106,33 @@ void* l_objectRegister;
 
 但**求值栈默认不落到 `l_stack`**：`FloatingStackExpressions`（AngelscriptStaticJIT.h:221-233）把每条 push 记成**符号表达式**（`FStackExpression{DWords, Expression, OffsetOnStack, bIsVolatile...}`），后续指令消费栈顶时直接内联表达式文本，直到真正需要内存地址/跨标签存活/函数调用时才 `MaterializeStackAtOffset`。效果：`(a+b)*c` 这类表达式链在生成代码里就是一行嵌套 C++ 表达式，**留给 MSVC 做常量折叠与寄存器分配**——这是"转译后接近原生性能"的最大来源。
 
+两种压栈的代码级对照（AngelscriptStaticJIT.cpp:2437-2459）：
+
+```cpp
+// Push：立即物化 —— 真实内存写
+Line("value_assign_safe<{0}>(&l_stack[{1}], {2});", StackType, Offset*4, Expression);
+
+// PushVolatile：只记账 —— 不写内存，(偏移, 表达式) 进 FloatingStackExpressions
+Expr.Expression = Expression;   /* 仅登记 */
+```
+
+`MaterializeStackAtOffset(Offset)`（:2539）在需要时才把某槽的表达式落地成一行赋值并从表移除。以 `x = (a+b)*c`（字节码 `PshV4 a; PshV4 b; ADDi; PshV4 c; MULi; StoreV4 x`）为例：
+
+```cpp
+// 无 FloatingStack 的朴素转译（每步写 l_stack，5 次内存往返）:
+value_assign_safe<int>(&l_stack[0], a);
+value_assign_safe<int>(&l_stack[4], b);
+value_assign_safe<int>(&l_stack[0], *(int*)&l_stack[0] + *(int*)&l_stack[4]);
+value_assign_safe<int>(&l_stack[4], c);
+value_assign_safe<int>(&l_stack[0], *(int*)&l_stack[0] * *(int*)&l_stack[4]);
+x = *(int*)&l_stack[0];
+
+// FloatingStack 实际产出（PshV4 走 volatile，运算内联表达式，StoreV4 直接落变量）:
+x = (a + b) * c;
+```
+
+注意与 VM 解释器的对照：同一个 `ADDi`，解释器执行时是真实的栈内存读写（`l_fp` 偏移访存）；转译代码里 `l_stack[]` 虽然存在但大部分时间不被写——转译器不需要自己实现优化，只负责"不挡路"，把优化留给 C++ 编译器。
+
 配套状态跟踪同样是为了少物化、少分支：
 
 - `EValueRegisterState` + 跳转汇合处的多状态检测（`bHasMultipleValueRegisterStates` 冲突时物化）；
@@ -275,3 +302,4 @@ if (JITFunctions != nullptr && !bScriptDevelopmentMode) {
 | unity 文件 + 内容不变不重写 | 转译代码体量大（每模块一 cpp，20 万行合并一个 .jit.cpp），增量产出保住迭代速度 |
 | 编辑器强制 `AS_SKIP_JITTED_CODE` | 调试/热重载能力与性能路径彻底分离，互不妥协 |
 | `ScriptCallNative` 与 `CallFunctionCaller` 逐行同构 | 解释器与 JIT 走完全相同的系统调用桥，行为（WorldContext 检查等）天然一致 |
+| 转译后返回值走 native ABI（RAX/XMM0），跨过解释器的 valueRegister 内存往返 | 解释器的"寄存器"是 `m_regs` 结构体字段（两次内存写）；转译函数间调用/UE 直调全部真·CPU 寄存器返回，可内联（对照表见《AngelScript虚拟机架构说明》§10.1） |

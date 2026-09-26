@@ -152,10 +152,30 @@ switch 的 case 值**严格连续无洞**（注释：单次跳转表查找）；
 | 控制流 | `CALL RET JMP` | |
 | 条件跳转 | `JZ JNZ JS JNS JP JNP`（另有 `JLowZ` 等低位版） | 全部基于 `valueRegister` |
 | 布尔测试 | `TZ TNZ TS TNS TP TNP` | 结果规范成 `VALUE_OF_BOOLEAN_TRUE` 并清零其余字节（`AS_SIZEOF_BOOL==1` 时逐字节写，volatile 防重排） |
-| 算术 | `ADDi SUBi MULi DIVi ADDf ... NEGi NEGF POWi`（溢出检测版 `as_powi`） | |
+| 算术 | `ADDi SUBi MULi DIVi ADDf ... NEGi NEGf POWi`（含 `ADDIi` 等立即数变体；溢出检测版 `as_powi`） | **三地址变量直访：源/目标都是 fp 偏移的栈帧变量，不经过求值栈**（见下） |
 | 对象 | `ALLOC FREE REFCPY ObjInfo CpyVtoR4 SetV1 ...` | |
 | 调用 | `CALLSYS CALLBND CallPtr CALLINTF`（见下） | |
 | 特殊 | `SUSPEND ThrowException RetInfo JitEntry JNullR` | 后四个为 fork 新增/改造 |
+
+**求值栈的角色——寄存器/变量型混合架构**：AngelScript **不是纯栈机**。算术、比较等"计算"指令不经过求值栈：
+
+```cpp
+// asBC_ADDi（:2921）——三地址变量直访，fp 负偏移直达局部变量：
+*(int*)(l_fp - SWORDARG0) = *(int*)(l_fp - SWORDARG1) + *(int*)(l_fp - SWORDARG2);
+// 即 x = a + b 编译成 ADDi v_x, v_a, v_b，无任何 Psh/Pop
+
+// 比较的路径：CpyVtoR4 把变量拷进 valueRegister → JZ/JNZ/JS... 基于寄存器判定
+```
+
+求值栈（数据栈顶 `l_sp`，§3 栈帧布局的"评估栈"区）只承担三类**边界**工作：
+
+| 场景 | 说明 |
+|---|---|
+| **函数调用传参** | `PshV4/PshC4/PshGPtr/PSF` 把参数压栈，被调者按 fp 正偏移读取（§3 参数区） |
+| **对象/指针周转** | `SwapPtr`、ALLOC 前压对象指针、返回对象经 objectRegister |
+| **系统调用** | `CallFunctionCaller` 从 `m_regs.stackPointer` 起读参数（§7.3） |
+
+这解释了 StaticJIT 侧的对应设计（《Precompile与StaticJIT》§4.2/§4.3）：`ADDi` 翻译成 `VArg_SignedVar(0)=VArg_SignedVar(1)+VArg_SignedVar(2)`——VArg 直接映射具名 C++ 局部变量，**不经过 FloatingStack**；FloatingStack（符号表达式栈）主要服务于 `PshV4` 等**传参/压栈**指令的转译。
 
 **调用类指令细节**：
 
@@ -168,6 +188,42 @@ switch 的 case 值**严格连续无洞**（注释：单次跳转表查找）；
 - **`ThrowException`**（:4342，fork 新增）：目前两个来源——switch 枚举值非法 / Unknown exception，直接 `SetInternalException` 后退出循环。
 - **`RetInfo`**（:4366，fork 新增）：记录函数是从哪条 return 语句退出的，写入 `tld->ReturnInfo`（仅非 Shipping），供诊断。
 - **`JitEntry`**（:3571）：**解释器中是 nop**（跳过 1+AS_PTR_SIZE 个 DWORD）。它是 JIT 机器码里"跳回解释器继续执行"的边界标记/恢复点——JIT 编译器把无法编译的片段降级回解释器时使用。
+
+### 6.2.1 调用约定：传参与返回值（与 Lua/CIL 对照）
+
+**参数传递——显式 push**：
+
+```
+PshV4 v_a        // --l_sp; *l_sp = fp[-v_a]     ← 一条条真压
+PshV4 v_b
+CALL func        // PushCallState 保存调用者 fp/pc/sp
+                // 新 fp = 对齐后的 sp —— 参数"变成"被调者 fp 的正偏移
+                // sp = 新 fp - variableSpace（局部变量区）
+RET w            // PopCallState + l_sp += w 弹掉参数（:1752-1753）
+```
+
+**返回值——三条路径，不走参数槽**（编译器按返回类型选择）：
+
+| 返回类型 | 被调者侧 | 调用者侧取回 |
+|---|---|---|
+| 原始类型（int/float/枚举） | `CpyVtoR4/R8`（:2723）把变量拷进 **valueRegister** 后 RET | `CpyRtoV4/R8`（:2738）把寄存器值拷进调用者变量 |
+| 对象句柄 | 存 **objectRegister**（引用计数在 REFCPY 处理） | 直接使用 objectRegister |
+| 大值对象（`DoesReturnOnStack`） | **隐藏指针参数**：调用者 Prepare 时在参数区第一个槽放返回值地址（:536-544），被调者直写那片空间 | 无需取回——对象本来就在调用者空间里 |
+
+系统调用同构：`CallFunctionCaller` 的 `ReturnAddress` 三选一——栈上返回值槽 / `&m_regs.objectRegister` / `&m_regs.valueRegister`（:5222-5239）。
+
+**与 Lua / CIL 的对照**：
+
+| | CIL（C#）/ JVM | AngelScript | Lua 5 |
+|---|---|---|---|
+| 计算模型 | 求值栈 | **变量槽三地址**（fp 偏移，类 Lua） | 寄存器（栈帧槽位编号） |
+| `a+b` 形态 | `ldloc a; ldloc b; add; stloc x`（4 条） | `ADDi v_x, v_a, v_b`（1 条） | `ADD R0 R1 R2`（1 条） |
+| 传参 | 走栈（隐式栈顶） | **显式 push 指令**压栈，被调者 fp 正偏移取 | 预留连续槽，CALL 时帧窗口平移（帧重叠） |
+| 返回值 | 栈顶 | **valueRegister/objectRegister/隐藏指针**（C 风格 ABI） | 写回参数槽（R[A] 窗口） |
+
+AS 的"寄存器"与 Lua 同源——都是栈帧槽位显式寻址而非固定寄存器堆；但返回值通道学的是 **C 风格**（小值走寄存器、大值走 sret 隐藏指针，与 x64 C++ ABI 几乎一致），而非 Lua 的"返回值占参数槽"。这让 `CallFunctionCaller` 与 JIT 的返回值处理直接对齐 native 语义。
+
+**注意 valueRegister 不是 CPU 寄存器**：它是 `asCContext` 成员结构 `m_regs` 里的一个 uint64 字段（:237）——`CpyVtoR4 → RET → CpyRtoV4` 是两次跨指令的**内存往返**；指令边界处值必然落回 `m_regs`（switch 分发会破坏调用者保存寄存器，无法 pin 在 RAX）。解释器里真正常驻 CPU 寄存器的只有 `l_bc/l_sp/l_fp` 三个指针。真·寄存器返回只存在于转译路径（见 §10.1）。
 
 ### 6.3 SUSPEND：行回调与循环检测的宿主（:2397-2432）
 
@@ -303,6 +359,17 @@ else if (tld->activeContext != nullptr)   // 正在跑解释器
 - **UE 直调入口**：`UASFunction_JIT` 系列（ASClass.cpp:636+ 的 `MakeRawJITCall_*`）——**UObject 反射调用脚本函数时直接进 JIT 机器码**，连 asCContext 都不创建（线程安全函数另有 generic 路径）。虚拟调用先 `ResolveScriptVirtual` 查 VFT 再取 `jitFunction`。
 - **JIT → 解释器降级**：`asBC_JitEntry` 占位（§6.2）。
 - **调试盲区**：JIT 路径没有 `SUSPEND`/行回调——断点/单步只在解释器路径逐行生效；数据断点（硬件断点）不受影响，因为它们工作在内存写入层面。
+
+### 10.1 返回值通道：解释器 vs 转译路径的"寄存器"差异
+
+| 路径 | 返回值通道 | 是否真 CPU 寄存器 |
+|---|---|---|
+| 解释器 → 解释器 | `m_regs.valueRegister`（asCContext 结构体字段，§6.2.1） | ✗——`CpyVtoR4→RET→CpyRtoV4` 是两次跨指令内存往返，指令边界必然落回 `m_regs` |
+| 解释器收到系统函数返回 | caller thunk 内部真实经 RAX，随即写入 `&m_regs.valueRegister`（内存） | 半程（RAX→立刻落内存） |
+| 转译函数 ↔ 转译函数 | 普通 C++ 调用约定（native ABI），可被内联 | ✓ RAX/XMM0 |
+| UE 反射 → 转译函数 | `MakeRawJITCall_ReturnValue<T>` 模板直接 return | ✓ 全程 native |
+
+`Execute()` 顶层那个 `asJITFunction(Execution, l_fp, &outValue)` 的指针出参只是**VM 汇合点的边缘协议**；转译函数彼此之间的调用不经过它，走的就是 C++ ABI。同一份字节码的 `RET` 语义，在两条路径隔着"模拟寄存器（内存）→ 物理寄存器"的跃迁——这是转译后性能收益的重要来源之一（另一来源是表达式内联，见《Precompile与StaticJIT》§4.3）。
 
 ## 11. UE 侧定制汇总（对照上游 AngelScript 2.3x）
 
