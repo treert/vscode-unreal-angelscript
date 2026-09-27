@@ -423,6 +423,18 @@ connection.onInitialize((_params): InitializeResult => {
 function DetectUnrealConnectionTimeout()
 {
     UnrealTypesTimedOut = true;
+
+    // No engine connection: finish with a script-only type database so that
+    // resolve (and thus hover/references/definition) works for script-defined
+    // symbols even without the engine running.  If the engine connects later,
+    // the DebugDatabase path will add the real types and re-resolve everything.
+    typedb.FinishTypesFromUnreal();
+
+    let scriptSettings = scriptfiles.GetScriptSettings()
+    typedb.AddPrimitiveTypes(scriptSettings.floatIsFloat64);
+
+    // Make sure no modules are resolved anymore
+    ReResolveAllModules();
 }
 
 function DetectUnrealTypeListTimeout()
